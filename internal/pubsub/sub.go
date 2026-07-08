@@ -4,10 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	ampq "github.com/rabbitmq/amqp091-go"
 )
 
 type SimpleQueueType string
+type AckType int64
+
+const (
+	Ack AckType = iota
+	NackReque
+	NackDiscard
+)
 
 const (
 	DurableQueue   SimpleQueueType = "durable"
@@ -30,9 +38,12 @@ func DeclareAndBind(
 	if queueType == TransientQueue {
 		durable, autoDelete, exlusive = false, true, true
 	}
-	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exlusive, false, nil)
+	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exlusive, false,
+		ampq.Table{
+			"x-dead-letter-exchange": routing.ExchnagePerilDLX,
+		})
 	if err != nil {
-		return nil, ampq.Queue{}, fmt.Errorf("Unable to decalre queue: %s", err)
+		return nil, ampq.Queue{}, fmt.Errorf("Unable to bind queue: %s", err)
 	}
 
 	err = ch.QueueBind(queueName, key, exchange, false, nil)
@@ -49,7 +60,7 @@ func SubscribeJSON[T any](
 	queueName,
 	key string,
 	queueType SimpleQueueType,
-	handler func(T),
+	handler func(T) AckType,
 ) error {
 	ch, queue, err := DeclareAndBind(
 		conn,
@@ -74,12 +85,23 @@ func SubscribeJSON[T any](
 			var messageBody T
 			err := json.Unmarshal(message.Body, &messageBody)
 			if err != nil {
-				fmt.Printf("an errro happen while parsing the message body queue: %s, exchange: %s \n", queueName, exchange)
+				fmt.Printf("an error happen while parsing the message body queue: %s, exchange: %s \n", queueName, exchange)
 				continue
 			}
 
-			handler(messageBody)
-			message.Ack(true)
+			switch handler(messageBody) {
+			case Ack:
+				// fmt.Println("message acknowledged")
+				message.Ack(true)
+			case NackReque:
+				// fmt.Println("message acknowledgement failed requeue")
+				message.Nack(false, true)
+			case NackDiscard:
+				// fmt.Println("message acknowledgement failed dead letter queue")
+				message.Nack(false, false)
+			default:
+				fmt.Println("Unkown acktype")
+			}
 		}
 	}()
 

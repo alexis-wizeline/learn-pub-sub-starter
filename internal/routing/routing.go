@@ -1,5 +1,7 @@
 package routing
 
+import "strings"
+
 const (
 	ArmyMovesPrefix = "army_moves"
 
@@ -13,4 +15,13 @@ const (
 const (
 	ExchangePerilDirect = "peril_direct"
 	ExchangePerilTopic  = "peril_topic"
+	ExchnagePerilDLX    = "peril_dlx"
 )
+
+func GenerateKey(tags ...string) string {
+	if len(tags) == 1 {
+		tags = append(tags, "*")
+	}
+
+	return strings.Join(tags, ".")
+}
