@@ -1,6 +1,8 @@
 package pubsub
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 
@@ -62,6 +64,43 @@ func SubscribeJSON[T any](
 	queueType SimpleQueueType,
 	handler func(T) AckType,
 ) error {
+	return subscriber[T](
+		conn,
+		exchange,
+		queueName,
+		key,
+		queueType,
+		handler,
+		jsonUnmarsahller[T])
+}
+
+func SubscribeGob[T any](
+	conn *ampq.Connection,
+	exchange,
+	queueName,
+	key string,
+	queueType SimpleQueueType,
+	handler func(T) AckType,
+) error {
+	return subscriber[T](
+		conn,
+		exchange,
+		queueName,
+		key,
+		queueType,
+		handler,
+		gobUnmarshaller[T])
+}
+
+func subscriber[T any](
+	conn *ampq.Connection,
+	exchange,
+	queueName,
+	key string,
+	queueType SimpleQueueType,
+	handler func(T) AckType,
+	unmarshaller func([]byte) (T, error),
+) error {
 	ch, queue, err := DeclareAndBind(
 		conn,
 		exchange,
@@ -71,6 +110,9 @@ func SubscribeJSON[T any](
 	if err != nil {
 		return err
 	}
+	if err = ch.Qos(10, 0, false); err != nil {
+		return fmt.Errorf("unable to set QoS on channel: %s", err)
+	}
 
 	delivery, err := ch.Consume(queue.Name,
 		"",
@@ -79,26 +121,28 @@ func SubscribeJSON[T any](
 		false,
 		false,
 		nil)
+	if err != nil {
+		return fmt.Errorf("unable to start consuming from queue: %s", err)
+	}
 
 	go func() {
-		for message := range delivery {
-			var messageBody T
-			err := json.Unmarshal(message.Body, &messageBody)
+		for letter := range delivery {
+			message, err := unmarshaller(letter.Body)
 			if err != nil {
 				fmt.Printf("an error happen while parsing the message body queue: %s, exchange: %s \n", queueName, exchange)
 				continue
 			}
 
-			switch handler(messageBody) {
+			switch handler(message) {
 			case Ack:
 				// fmt.Println("message acknowledged")
-				message.Ack(true)
+				letter.Ack(true)
 			case NackReque:
 				// fmt.Println("message acknowledgement failed requeue")
-				message.Nack(false, true)
+				letter.Nack(false, true)
 			case NackDiscard:
 				// fmt.Println("message acknowledgement failed dead letter queue")
-				message.Nack(false, false)
+				letter.Nack(false, false)
 			default:
 				fmt.Println("Unkown acktype")
 			}
@@ -106,4 +150,25 @@ func SubscribeJSON[T any](
 	}()
 
 	return nil
+}
+
+func jsonUnmarsahller[T any](b []byte) (T, error) {
+	var data T
+	err := json.Unmarshal(b, &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
+}
+
+func gobUnmarshaller[T any](b []byte) (T, error) {
+	buffer := bytes.NewBuffer(b)
+	decoder := gob.NewDecoder(buffer)
+	var data T
+	err := decoder.Decode(&data)
+	if err != nil {
+		return data, err
+	}
+	return data, nil
 }

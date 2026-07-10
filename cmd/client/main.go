@@ -6,16 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-)
-
-const (
-	queuNameTemplate = "%s.%s"
 )
 
 func main() {
@@ -73,7 +71,7 @@ func main() {
 		routing.WarRecognitionsPrefix,
 		routing.GenerateKey(routing.WarRecognitionsPrefix),
 		pubsub.DurableQueue,
-		handleWar(state))
+		handleWar(state, warResultHandler(ch, state)))
 	if err != nil {
 		fmt.Println("Unable to subscribe to queue for war", err)
 		os.Exit(1)
@@ -99,7 +97,7 @@ func main() {
 			err = pubsub.PublishJSON(
 				ch,
 				routing.ExchangePerilTopic,
-				fmt.Sprintf(queuNameTemplate, routing.ArmyMovesPrefix, user),
+				routing.GenerateKey(routing.ArmyMovesPrefix, user),
 				mv,
 			)
 			if err != nil {
@@ -110,7 +108,16 @@ func main() {
 		case "status":
 			state.CommandStatus()
 		case "spam":
-			fmt.Println("Spamming not allowed yet!")
+			if len(input) < 2 {
+				fmt.Println("we need the number of logs to generate")
+				continue
+			}
+			publisghMaliciousLogs(ch,
+				state,
+				gamelogic.GetMaliciousLog(),
+				input[1],
+			)
+
 		case "help":
 			gamelogic.PrintClientHelp()
 		case "quit":
@@ -122,7 +129,7 @@ func main() {
 		}
 
 		if err != nil {
-			fmt.Println("An erro ocurr:", err)
+			fmt.Println("An error ocurred:", err)
 		}
 		err = nil
 	}
@@ -154,11 +161,12 @@ func handlerMove(gs *gamelogic.GameState, warHandler func(move gamelogic.ArmyMov
 	}
 }
 
-func handleWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+func handleWar(gs *gamelogic.GameState,
+	warResulthandler func(gamelogic.WarOutcome, string, string) pubsub.AckType) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(row gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		outcome, _, _ := gs.HandleWar(row)
+		outcome, winner, loser := gs.HandleWar(row)
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
 			return pubsub.NackReque
@@ -167,9 +175,9 @@ func handleWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.
 		case gamelogic.WarOutcomeOpponentWon,
 			gamelogic.WarOutcomeYouWon,
 			gamelogic.WarOutcomeDraw:
-			return pubsub.Ack
+			return warResulthandler(outcome, winner, loser)
 		default:
-			fmt.Println("Invalid outocome")
+			fmt.Println("Invalid outcome")
 		}
 
 		return pubsub.NackDiscard
@@ -190,5 +198,45 @@ func makeWarHandler(ch *amqp.Channel, gs *gamelogic.GameState) func(gamelogic.Ar
 			return pubsub.NackReque
 		}
 		return pubsub.Ack
+	}
+}
+
+func warResultHandler(ch *amqp.Channel, gs *gamelogic.GameState) func(gamelogic.WarOutcome, string, string) pubsub.AckType {
+	return func(outcome gamelogic.WarOutcome, winner, losser string) pubsub.AckType {
+		var result string
+		switch outcome {
+		case gamelogic.WarOutcomeDraw:
+			result = fmt.Sprintf("A war between {%s} and {%s} resulted in a draw", winner, losser)
+		case gamelogic.WarOutcomeOpponentWon, gamelogic.WarOutcomeYouWon:
+			result = fmt.Sprintf("{%s} won a war against {%s}", winner, losser)
+		default:
+			result = "unknow result type"
+		}
+
+		err := pubsub.PublishGameLog(ch, routing.GameLog{
+			CurrentTime: time.Now().UTC(),
+			Message:     result,
+			Username:    gs.GetUsername(),
+		})
+		if err != nil {
+			return pubsub.NackReque
+		}
+
+		return pubsub.Ack
+	}
+}
+
+func publisghMaliciousLogs(ch *amqp.Channel, gs *gamelogic.GameState, message, quantity string) {
+	num, err := strconv.Atoi(quantity)
+	if err != nil {
+		return
+	}
+
+	for range num {
+		pubsub.PublishGameLog(ch, routing.GameLog{
+			CurrentTime: time.Now().UTC(),
+			Message:     message,
+			Username:    gs.GetUsername(),
+		})
 	}
 }

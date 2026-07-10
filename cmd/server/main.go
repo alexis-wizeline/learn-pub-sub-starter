@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -14,7 +15,7 @@ import (
 )
 
 func main() {
-	_, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	connectionStrig := "amqp://guest:guest@localhost:5672/"
 	rabbit, err := amqp.Dial(connectionStrig)
@@ -29,27 +30,24 @@ func main() {
 		os.Exit(1)
 	}
 	defer ch.Close()
+	defer rabbit.Close()
 
-	logsCh, logsQueu, err := pubsub.DeclareAndBind(
-		rabbit,
-		routing.ExchangePerilTopic,
-		routing.GameLogSlug,
-		fmt.Sprintf("%s.*", routing.GameLogSlug),
-		pubsub.DurableQueue)
+	err = subscribeLogQueue(rabbit)
 	if err != nil {
-		fmt.Println("unable to bind queue for ", routing.ExchangePerilTopic, err)
+		fmt.Println("unable to subscribe the logs queue, ", err)
 		os.Exit(1)
 	}
-
-	_ = logsQueu
-	defer logsCh.Close()
-	defer rabbit.Close()
 
 	fmt.Println("Starting Peril server...")
 	fmt.Println("Connected to Rabbit succesfully", rabbit.RemoteAddr())
 	gamelogic.PrintServerHelp()
 	for {
 		input := gamelogic.GetInput()
+		if len(input) == 0 {
+			<-ctx.Done()
+			fmt.Println("\nShutting down server...")
+			return
+		}
 		var err error
 		switch input[0] {
 		case "pause":
@@ -80,4 +78,23 @@ func publishGameState(ch *amqp.Channel, inPuase bool) error {
 	return pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.PauseKey, routing.PlayingState{
 		IsPaused: inPuase,
 	})
+}
+
+func subscribeLogQueue(conn *amqp.Connection) error {
+	return pubsub.SubscribeGob(conn,
+		routing.ExchangePerilTopic,
+		routing.GameLogSlug,
+		routing.GenerateKey(routing.GameLogSlug),
+		pubsub.DurableQueue,
+		logsHandler,
+	)
+}
+
+func logsHandler(gl routing.GameLog) pubsub.AckType {
+	defer fmt.Print("> ")
+	err := gamelogic.WriteLog(gl)
+	if err != nil {
+		return pubsub.NackReque
+	}
+	return pubsub.Ack
 }
